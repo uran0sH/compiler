@@ -1,0 +1,63 @@
+CONST = @{ "const" ~ !(ASCII_ALPHANUMERIC | "_") }
+INT =  @{ "int" ~ !(ASCII_ALPHANUMERIC | "_") }
+VOID = @{ "void" ~ !(ASCII_ALPHANUMERIC | "_") }
+IF = @{ "if" ~ !(ASCII_ALPHANUMERIC | "_") }
+ELSE = @{ "else" ~ !(ASCII_ALPHANUMERIC | "_") }
+WHILE = @{ "while" ~ !(ASCII_ALPHANUMERIC | "_") }
+BREAK = @{ "break" ~ !(ASCII_ALPHANUMERIC | "_") }
+CONTINUE = @{ "continue" ~ !(ASCII_ALPHANUMERIC | "_") }
+RETURN = @{ "return" ~ !(ASCII_ALPHANUMERIC | "_") }
+EQ = { "==" }
+NEQ = { "!=" }
+LT = { "<" }
+GT = { ">" }
+LE = { "<=" }
+GE = { ">=" }
+
+LINE_COMMENT = @{ "//" ~ (!NEWLINE ~ ANY)* ~ (NEWLINE | EOI) }
+
+MULTILINE_COMMENT = @{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+COMMENT = _{ LINE_COMMENT | MULTILINE_COMMENT }
+
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+
+PLUS = { "+" }
+MINUS = { "-" }
+MUL = { "*" }
+DIV = { "/" }
+MOD = { "%" }
+ASSIGN = { "=" }
+NOT = { "!" }
+AND = { "&&" }
+OR = { "||" }
+L_PAREN = { "(" }
+R_PAREN = { ")" }
+L_BRACE = { "{" }
+R_BRACE = { "}" }
+L_BRACKT = { "[" }
+R_BRACKT = { "]" }
+COMMA = { "," }
+SEMICOLON = { ";" }
+
+IDENT = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+INTEGER_CONST = @{
+    ("0x" | "0X") ~ ASCII_HEX_DIGIT+ |
+    "0" ~ ASCII_OCT_DIGIT+ |
+    ASCII_DIGIT+
+}
+
+TOKEN = {
+    LINE_COMMENT |
+    MULTILINE_COMMENT |
+    WHITESPACE |
+    NEWLINE |
+    CONST | INT | VOID | IF | ELSE | WHILE | BREAK | CONTINUE | RETURN |
+    EQ | NEQ | LT | GT | LE | GE | PLUS | MINUS | MUL | DIV | MOD |
+    ASSIGN | NOT | AND | OR | L_PAREN | R_PAREN | L_BRACE | R_BRACE |
+    L_BRACKT | R_BRACKT | COMMA | SEMICOLON | IDENT | INTEGER_CONST
+}
+
+// 程序结构定义
+program = { SOI ~ TOKEN* ~ EOI }
