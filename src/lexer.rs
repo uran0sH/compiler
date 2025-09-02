@@ -843,4 +843,13 @@ mod tests {
                 .collect::<Vec<String>>()[..]
         );
     }
+    
+    #[test]
+    fn test() {
+        let input = "const const_abc";
+        let tokens = tokenize(input);
+        for token in tokens {
+            println!("{}", token);
+        }
+    }
 }

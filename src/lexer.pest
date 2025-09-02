@@ -1,12 +1,12 @@
-CONST = { "const" }
-INT = { "int" }
-VOID = { "void" }
-IF = { "if" }
-ELSE = { "else" }
-WHILE = { "while" }
-BREAK = { "break" }
-CONTINUE = { "continue" }
-RETURN = { "return" }
+CONST = @{ "const" ~ !(ASCII_ALPHANUMERIC | "_") }
+INT =  @{ "int" ~ !(ASCII_ALPHANUMERIC | "_") }
+VOID = @{ "void" ~ !(ASCII_ALPHANUMERIC | "_") }
+IF = @{ "if" ~ !(ASCII_ALPHANUMERIC | "_") }
+ELSE = @{ "else" ~ !(ASCII_ALPHANUMERIC | "_") }
+WHILE = @{ "while" ~ !(ASCII_ALPHANUMERIC | "_") }
+BREAK = @{ "break" ~ !(ASCII_ALPHANUMERIC | "_") }
+CONTINUE = @{ "continue" ~ !(ASCII_ALPHANUMERIC | "_") }
+RETURN = @{ "return" ~ !(ASCII_ALPHANUMERIC | "_") }
 EQ = { "==" }
 NEQ = { "!=" }
 LT = { "<" }
@@ -20,7 +20,7 @@ MULTILINE_COMMENT = @{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 
 COMMENT = _{ LINE_COMMENT | MULTILINE_COMMENT }
 
-WHITESPACE = _{ (" " | "\t" | NEWLINE)+ }
+WHITESPACE = _{ " " | "\t" | NEWLINE }
 
 PLUS = { "+" }
 MINUS = { "-" }
@@ -44,8 +44,8 @@ IDENT = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 INTEGER_CONST = @{
     ("0x" | "0X") ~ ASCII_HEX_DIGIT+ |
-    "0" ~ ASCII_OCT_DIGIT* |
-    ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*
+    "0" ~ ASCII_OCT_DIGIT+ |
+    ASCII_DIGIT+
 }
 
 TOKEN = {
