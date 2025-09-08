@@ -3,6 +3,7 @@ use std::{env, fs};
 use crate::lexer::{tokenize, TokenKind};
 
 mod lexer;
+mod parser;
 
 fn main() {
     //收集命令行参数
@@ -27,4 +28,5 @@ fn main() {
             eprintln!("{}", t);
         }
     });
+    parser::parse(&input);
 }

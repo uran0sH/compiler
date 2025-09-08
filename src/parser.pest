@@ -1,0 +1,131 @@
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+
+Const    = @{ "const" ~ !(ASCII_ALPHANUMERIC | "_") }
+Int      = @{ "int" ~ !(ASCII_ALPHANUMERIC | "_") }
+Void     = @{ "void" ~ !(ASCII_ALPHANUMERIC | "_") }
+If       = @{ "if" ~ !(ASCII_ALPHANUMERIC | "_") }
+Else     = @{ "else" ~ !(ASCII_ALPHANUMERIC | "_") }
+While    = @{ "while" ~ !(ASCII_ALPHANUMERIC | "_") }
+Break    = @{ "break" ~ !(ASCII_ALPHANUMERIC | "_") }
+Continue = @{ "continue" ~ !(ASCII_ALPHANUMERIC | "_") }
+Return   = @{ "return" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+Keyword = { Const | Int | Void | If | Else | While | Break | Continue | Return }
+
+Eq  = @{ "==" }
+Neq = @{ "!=" }
+Le  = @{ "<=" }
+Ge  = @{ ">=" }
+Lt  = @{ "<" }
+Gt  = @{ ">" }
+
+Plus      = { "+" }
+Minus     = { "-" }
+Mul       = { "*" }
+Div       = { "/" }
+Mod       = { "%" }
+Assign    = { "=" }
+Not       = { "!" }
+And       = { "&&" }
+Or        = { "||" }
+LParen    = { "(" }
+RParen    = { ")" }
+LBrace    = { "{" }
+RBrace    = { "}" }
+LBracket  = { "[" }
+RBracket  = { "]" }
+Comma     = { "," }
+Semicolon = { ";" }
+
+LINE_COMMENT = @{ "//" ~ (!NEWLINE ~ ANY)* ~ (NEWLINE | EOI) }
+
+MULTILINE_COMMENT = @{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+COMMENT = _{ LINE_COMMENT | MULTILINE_COMMENT }
+
+// 词法规则
+Ident    = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+IntConst = @{
+    ("0x" | "0X") ~ ASCII_HEX_DIGIT+
+  | "0" ~ ASCII_OCT_DIGIT+
+  | ASCII_DIGIT+
+}
+
+program = { SOI ~ CompUnit ~ EOI }
+
+CompUnit = { (Decl | FuncDef)+ }
+
+Decl = { ConstDecl | VarDecl }
+
+ConstDecl = { Const ~ BType ~ ConstDef ~ (Comma ~ ConstDef)* ~ Semicolon }
+
+BType = { Int }
+
+ConstDef = { !Keyword ~ Ident ~ (LBracket ~ ConstExp ~ RBracket)* ~ Assign ~ ConstInitVal }
+
+ConstInitVal = { ConstExp | LBrace ~ (ConstInitVal ~ (Comma ~ ConstInitVal)*)? ~ RBrace }
+
+VarDecl = { BType ~ VarDef ~ (Comma ~ VarDef)* ~ Semicolon }
+
+VarDef = { !Keyword ~ Ident ~ (LBracket ~ ConstExp ~ RBracket)* ~ Assign ~ InitVal | !Keyword ~ Ident ~ (LBracket ~ ConstExp ~ RBracket)* }
+
+InitVal = { Exp | LBrace ~ (InitVal ~ (Comma ~ InitVal)*)? ~ RBrace }
+
+FuncDef = { FuncType ~ !Keyword ~ Ident ~ LParen ~ FuncFParams? ~ RParen ~ Block }
+
+FuncType = { Void | Int }
+
+FuncFParams = { FuncFParam ~ (Comma ~ FuncFParam)* }
+
+FuncFParam = { BType ~ !Keyword ~ Ident ~ (LBracket ~ RBracket ~ (LBracket ~ Exp ~ RBracket)*)? }
+
+Block = { LBrace ~ BlockItem* ~ RBrace }
+
+BlockItem = { Decl | Stmt }
+
+Elif = { Else ~ If }
+
+Stmt = {
+    LVal ~ Assign ~ Exp ~ Semicolon
+  | Exp? ~ Semicolon
+  | Block
+  | If ~ LParen ~ Cond ~ RParen ~ Stmt ~ (Elif ~ LParen ~ Cond ~ RParen ~ Stmt)? ~ (Else ~ Stmt)?
+  | While ~ LParen ~ Cond ~ RParen ~ Stmt
+  | Break ~ Semicolon
+  | Continue ~ Semicolon
+  | Return ~ Exp? ~ Semicolon
+}
+
+Exp = { AddExp }
+
+Cond = { LOrExp }
+
+LVal = { !Keyword ~ Ident ~ (LBracket ~ Exp ~ RBracket)* }
+
+PrimaryExp = { (LParen ~ Exp ~ RParen) | LVal | Number }
+
+Number = { IntConst }
+
+UnaryExp = {
+    !Keyword ~ Ident ~ LParen ~ FuncRParams? ~ RParen
+  | PrimaryExp
+  | UnaryOp ~ UnaryExp
+}
+
+UnaryOp = { Plus | Minus | Not }
+
+FuncRParams = { Exp ~ (Comma ~ Exp)* }
+
+MulExp = { UnaryExp ~ ((Mul | Div | Mod) ~ UnaryExp)* }
+
+AddExp = { MulExp ~ ((Plus | Minus) ~ MulExp)* }
+
+RelExp = { AddExp ~ ((Lt | Gt | Le | Ge) ~ AddExp)* }
+
+EqExp = { RelExp ~ ((Eq | Neq) ~ RelExp)* }
+
+LAndExp = { EqExp ~ (And ~ EqExp)* }
+
+LOrExp = { LAndExp ~ (Or ~ LAndExp)* }
+
+ConstExp = { AddExp }
