@@ -1,10 +1,9 @@
-use std::collections::{HashMap, HashSet};
-
-use pest::{
-    Parser,
-    error::{Error, InputLocation, LineColLocation},
-    iterators::Pair,
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
 };
+
+use pest::{Parser, iterators::Pair};
 use pest_derive::Parser;
 
 #[macro_export]
@@ -150,6 +149,7 @@ pub struct Analyzer {
     scope_stack: Vec<HashMap<String, Type>>,
     function_table: HashMap<String, FunctionType>,
     current_function_ret_ty: Option<Type>,
+    current_function_params: Option<HashMap<String, Type>>,
     is_error: bool,
 }
 
@@ -159,6 +159,7 @@ impl Analyzer {
             scope_stack: vec![HashMap::new()],
             function_table: HashMap::new(),
             current_function_ret_ty: None,
+            current_function_params: None,
             is_error: false,
         }
     }
@@ -502,12 +503,14 @@ fn visit_func_def(pair: Pair<Rule>, a: &mut Analyzer) {
     }
     if l == 6 {
         let func_fparams = inner_pairs[3].clone();
-        visit_func_fparams(func_fparams, a, ident.as_str());
+        let ident_ty = visit_func_fparams(func_fparams, a, ident.as_str());
+        a.current_function_params = Some(ident_ty);
     }
     let block = inner_pairs.last().cloned().unwrap().clone();
     a.current_function_ret_ty = Some(ret_ty);
     visit_block(block, a);
     a.current_function_ret_ty = None;
+    a.current_function_params = None;
 }
 
 fn visit_func_type(pair: Pair<Rule>) -> Type {
@@ -519,8 +522,8 @@ fn visit_func_type(pair: Pair<Rule>) -> Type {
     }
 }
 
-fn visit_func_fparams(pair: Pair<Rule>, a: &mut Analyzer, fun_name: &str) {
-    let mut ident = HashSet::new();
+fn visit_func_fparams(pair: Pair<Rule>, a: &mut Analyzer, fun_name: &str) -> HashMap<String, Type> {
+    let mut ident = HashMap::new();
     for pair_inner in pair.into_inner() {
         match pair_inner.as_rule() {
             Rule::FuncFParam => {
@@ -529,7 +532,7 @@ fn visit_func_fparams(pair: Pair<Rule>, a: &mut Analyzer, fun_name: &str) {
                     Some((n, t)) => (n, t),
                     None => continue,
                 };
-                if ident.contains(&name) {
+                if ident.contains_key(&name) {
                     a.is_error = true;
                     report_semantic_error(
                         ErrorCode::RepeatedDeclaredVar.into(),
@@ -537,7 +540,7 @@ fn visit_func_fparams(pair: Pair<Rule>, a: &mut Analyzer, fun_name: &str) {
                         "Redefined variable",
                     );
                 } else {
-                    ident.insert(name);
+                    ident.insert(name, ty.clone());
                     match a.lookup_function_mut(fun_name) {
                         Some(v) => {
                             v.add_params(ty);
@@ -552,6 +555,7 @@ fn visit_func_fparams(pair: Pair<Rule>, a: &mut Analyzer, fun_name: &str) {
             _ => unreachable!(),
         }
     }
+    return ident;
 }
 
 fn visit_func_fparam(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(String, Type)> {
@@ -667,27 +671,27 @@ fn visit_unary_exp(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
     let line_col = inner_pairs[0].line_col();
     if inner_pairs[0].as_rule() == Rule::Ident {
         // 函数类型，需要检测形参，不匹配报函数参数不适用
+        match a.lookup_var(inner_pairs[0].as_str()) {
+            Some(_) => {
+                a.is_error = true;
+                report_semantic_error(
+                    ErrorCode::FuncCallOnVar.into(),
+                    line_col.0,
+                    "func call on var",
+                );
+            }
+            None => {
+                // a.is_error = true;
+                // report_semantic_error(
+                //     ErrorCode::UndefinedFunc.into(),
+                //     line_col.0,
+                //     "Can't find func",
+                // );
+            }
+        }
         let ft = match a.lookup_function(inner_pairs[0].as_str()) {
             Some(v) => v.clone(),
             None => {
-                match a.lookup_var(inner_pairs[0].as_str()) {
-                    Some(_) => {
-                        a.is_error = true;
-                        report_semantic_error(
-                            ErrorCode::FuncCallOnVar.into(),
-                            line_col.0,
-                            "func call on var",
-                        );
-                    }
-                    None => {
-                        a.is_error = true;
-                        report_semantic_error(
-                            ErrorCode::UndefinedFunc.into(),
-                            line_col.0,
-                            "Can't find func",
-                        );
-                    }
-                }
                 return None;
             }
         };
@@ -754,11 +758,29 @@ fn visit_lval(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
     let ident = inner_pairs[0].clone();
     let line_col = inner_pairs[0].line_col();
     let l = inner_pairs.len();
-    let decl_typ: Type = match a.lookup_var(ident.as_str()) {
-        Some(v) => v.clone(),
-        None => {
-            let t = match a.lookup_function(ident.as_str()) {
-                Some(v) => v.clone(),
+    let decl_typ: Type = {
+        if let Some(v) = a.lookup_var(ident.as_str()) {
+            v.clone()
+        } else if let Some(params) = &a.current_function_params {
+            if let Some(ty) = params.get(ident.as_str()) {
+                ty.clone()
+            } else {
+                match a.lookup_function(ident.as_str()) {
+                    Some(func_ty) => Type::Function(func_ty.clone()),
+                    None => {
+                        a.is_error = true;
+                        report_semantic_error(
+                            ErrorCode::UndeclaredVar.into(),
+                            line_col.0,
+                            "undeclared var",
+                        );
+                        return None;
+                    }
+                }
+            }
+        } else {
+            match a.lookup_function(ident.as_str()) {
+                Some(func_ty) => Type::Function(func_ty.clone()),
                 None => {
                     a.is_error = true;
                     report_semantic_error(
@@ -768,8 +790,7 @@ fn visit_lval(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
                     );
                     return None;
                 }
-            };
-            Type::Function(t)
+            }
         }
     };
     match decl_typ {
