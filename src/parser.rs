@@ -758,29 +758,11 @@ fn visit_lval(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
     let ident = inner_pairs[0].clone();
     let line_col = inner_pairs[0].line_col();
     let l = inner_pairs.len();
-    let decl_typ: Type = {
-        if let Some(v) = a.lookup_var(ident.as_str()) {
-            v.clone()
-        } else if let Some(params) = &a.current_function_params {
-            if let Some(ty) = params.get(ident.as_str()) {
-                ty.clone()
-            } else {
-                match a.lookup_function(ident.as_str()) {
-                    Some(func_ty) => Type::Function(func_ty.clone()),
-                    None => {
-                        a.is_error = true;
-                        report_semantic_error(
-                            ErrorCode::UndeclaredVar.into(),
-                            line_col.0,
-                            "undeclared var",
-                        );
-                        return None;
-                    }
-                }
-            }
-        } else {
-            match a.lookup_function(ident.as_str()) {
-                Some(func_ty) => Type::Function(func_ty.clone()),
+    let decl_typ: Type = match a.lookup_var(ident.as_str()) {
+        Some(v) => v.clone(),
+        None => {
+            let t = match a.lookup_function(ident.as_str()) {
+                Some(v) => v.clone(),
                 None => {
                     a.is_error = true;
                     report_semantic_error(
@@ -790,7 +772,8 @@ fn visit_lval(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
                     );
                     return None;
                 }
-            }
+            };
+            Type::Function(t)
         }
     };
     match decl_typ {
