@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
+use inkwell::AddressSpace;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{IntType, VoidType};
-use inkwell::values::FunctionValue;
+use inkwell::values::{FunctionValue, PointerValue};
 use pest::{Parser, iterators::Pair};
 use pest_derive::Parser;
 
@@ -18,6 +19,7 @@ pub struct LlvmIRGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
+    scope_stack: Vec<HashMap<String, PointerValue<'ctx>>>,
 }
 
 enum FuncType<'ctx> {
@@ -34,10 +36,32 @@ impl<'ctx> LlvmIRGen<'ctx> {
             context,
             module,
             builder,
+            scope_stack: Vec::new(),
         }
     }
 
-    pub fn parse_func_def(&self, func_def: Pair<Rule>) {
+    fn enter_scope(&mut self) {
+        self.scope_stack.push(HashMap::new());
+    }
+
+    fn exit_scope(&mut self) {
+        self.scope_stack.pop();
+    }
+
+    fn find_variable(&self, name: &str) -> Option<PointerValue<'ctx>> {
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(val) = scope.get(name) {
+                return Some(*val);
+            }
+        }
+        None
+    }
+
+    fn add_variable(&mut self, name: &str, val: PointerValue<'ctx>) {
+        self.scope_stack.last_mut().unwrap().insert(name.to_string(), val);
+    }
+
+    pub fn parse_func_def(&mut self, func_def: Pair<Rule>) {
         let mut inner = func_def.into_inner();
 
         // Get function's return type
@@ -97,13 +121,144 @@ impl<'ctx> LlvmIRGen<'ctx> {
         // }
     }
 
+    pub fn parse_decl(&mut self, decl: Pair<Rule>, is_global: bool) {
+        let mut inner = decl.into_inner();
+
+        // Get decl type
+        let decl_type = inner.next().unwrap();
+
+        match decl_type.as_rule() {
+            Rule::ConstDecl => {
+                // 处理常量声明: const BType ConstDef (, ConstDef)* ;
+                // 跳过 const 关键字
+                let mut inner = decl_type.into_inner();
+                let _btype = inner.next().unwrap(); // BType (目前只有 int)
+
+                // 处理常量定义列表
+                for const_def in inner {
+                    if const_def.as_rule() == Rule::ConstDef {
+                        self.parse_const_def(const_def);
+                    } else if const_def.as_rule() == Rule::Semicolon {
+                        break;
+                    }
+                }
+            }
+            Rule::VarDecl => {
+                // 处理变量声明: BType VarDef (, VarDef)* ;
+                let mut inner = decl_type.into_inner();
+                let _btype = inner.next().unwrap(); // BType (目前只有 int)
+
+                // 处理变量定义列表
+                for var_def in inner {
+                    if var_def.as_rule() == Rule::VarDef {
+                        self.parse_var_def(var_def, is_global);
+                    } else if var_def.as_rule() == Rule::Semicolon {
+                        break;
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // 解析常量定义
+    fn parse_const_def(&self, const_def: Pair<Rule>) {}
+
+    // 解析变量定义
+    fn parse_var_def(&mut self, var_def: Pair<Rule>, is_global: bool) {
+        let mut inner = var_def.into_inner();
+
+        // 获取变量名
+        let ident = inner.next().unwrap().as_str();
+
+        // skip (LBracket ~ ConstExp ~ RBracket)*
+        while let Some(item) = inner.next() {
+            if item.as_rule() == Rule::LBracket {
+                // Skip ConstExp
+                let _ = inner.next();
+                // Skip RBracket
+                let _ = inner.next();
+            } else if item.as_rule() == Rule::Assign {
+                let init_val = inner.next().unwrap();
+                let value = self.parse_init_val(init_val);
+
+                if is_global {
+                    // 在LLVM模块中创建全局变量
+                    let global = self.module.add_global(
+                        self.context.i32_type(),
+                        Some(AddressSpace::default()),
+                        ident,
+                    );
+                    global.set_initializer(&value);
+                    break;
+                } else {
+                    let alloca = self
+                        .builder
+                        .build_alloca(self.context.i32_type(), ident)
+                        .unwrap();
+                    let _ = self.builder.build_store(alloca, value);
+                    self.add_variable(ident, alloca);
+                    break;
+                }
+            } else if item.as_rule() == Rule::Semicolon {
+                // 没有初始化值，创建全局变量并初始化为0
+                let zero = self.context.i32_type().const_int(0, false);
+                let global = self.module.add_global(
+                    self.context.i32_type(),
+                    Some(inkwell::AddressSpace::default()),
+                    ident,
+                );
+                global.set_initializer(&zero);
+                break;
+            }
+        }
+    }
+
+    // 解析常量初始化值
+    fn parse_const_init_val(&self, init_val: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
+        let mut inner = init_val.into_inner();
+
+        match inner.next().unwrap().as_rule() {
+            Rule::ConstExp => {
+                // 解析常量表达式
+                self.parse_exp(inner.next().unwrap())
+            }
+            Rule::LBrace => {
+                // 处理数组初始化 { ... }
+                // 简化处理，返回0
+                self.context.i32_type().const_int(0, false)
+            }
+            _ => self.context.i32_type().const_int(0, false),
+        }
+    }
+
+    // 解析初始化值
+    fn parse_init_val(&self, init_val: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
+        let mut inner = init_val.into_inner();
+
+        let next = inner.next().unwrap();
+        match next.as_rule() {
+            Rule::Exp => {
+                // 解析表达式
+                self.parse_exp(next)
+            }
+            Rule::LBrace => {
+                // 处理数组初始化 { ... }
+                // 简化处理，返回0
+                self.context.i32_type().const_int(0, false)
+            }
+            _ => self.context.i32_type().const_int(0, false),
+        }
+    }
+
     // 解析代码块
     pub fn parse_block(
-        &self,
+        &mut self,
         block: Pair<Rule>,
         function: FunctionValue<'ctx>,
         has_return: &mut bool,
     ) {
+        self.enter_scope();
         let mut inner = block.into_inner();
 
         // 跳过左大括号
@@ -119,7 +274,7 @@ impl<'ctx> LlvmIRGen<'ctx> {
                             self.parse_stmt(block_item, function, has_return);
                         }
                         Rule::Decl => {
-                            todo!()
+                            self.parse_decl(block_item, false);
                         }
                         _ => unreachable!(),
                     }
@@ -128,6 +283,7 @@ impl<'ctx> LlvmIRGen<'ctx> {
                 _ => continue,
             }
         }
+        self.exit_scope();
     }
 
     // 解析语句
@@ -176,11 +332,17 @@ impl<'ctx> LlvmIRGen<'ctx> {
             match item.as_rule() {
                 Rule::Plus => {
                     let next_mul = self.parse_mul_exp(inner.next().unwrap());
-                    result = self.builder.build_int_add(result, next_mul, "addtmp").unwrap();
+                    result = self
+                        .builder
+                        .build_int_add(result, next_mul, "tmp_")
+                        .unwrap();
                 }
                 Rule::Minus => {
                     let next_mul = self.parse_mul_exp(inner.next().unwrap());
-                    result = self.builder.build_int_sub(result, next_mul, "subtmp").unwrap();
+                    result = self
+                        .builder
+                        .build_int_sub(result, next_mul, "tmp_")
+                        .unwrap();
                 }
                 _ => {}
             }
@@ -199,19 +361,24 @@ impl<'ctx> LlvmIRGen<'ctx> {
             match item.as_rule() {
                 Rule::Mul => {
                     let next_unary = self.parse_unary_exp(inner.next().unwrap());
-                    result = self.builder.build_int_mul(result, next_unary, "multmp").unwrap();
+                    result = self
+                        .builder
+                        .build_int_mul(result, next_unary, "multmp")
+                        .unwrap();
                 }
                 Rule::Div => {
                     let next_unary = self.parse_unary_exp(inner.next().unwrap());
                     result = self
                         .builder
-                        .build_int_signed_div(result, next_unary, "divtmp").unwrap();
+                        .build_int_signed_div(result, next_unary, "divtmp")
+                        .unwrap();
                 }
                 Rule::Mod => {
                     let next_unary = self.parse_unary_exp(inner.next().unwrap());
                     result = self
                         .builder
-                        .build_int_signed_rem(result, next_unary, "modtmp").unwrap();
+                        .build_int_signed_rem(result, next_unary, "modtmp")
+                        .unwrap();
                 }
                 _ => {}
             }
@@ -273,6 +440,33 @@ impl<'ctx> LlvmIRGen<'ctx> {
                     let result = self.context.i32_type().const_int(value, false);
                     return result;
                 }
+                Rule::LVal => {
+                    let mut lval_inner = item.into_inner();
+                    let ident = lval_inner.next().unwrap().as_str();
+
+                    // 首先检查是否是局部变量
+                    if let Some(var_ptr) = self.find_variable(ident) {
+                        // 加载局部变量的值
+                        return self
+                            .builder
+                            .build_load(var_ptr, ident)
+                            .unwrap()
+                            .into_int_value();
+                    } else {
+                        // 尝试作为全局变量处理
+                        if let Some(global_var) = self.module.get_global(ident) {
+                            // 加载全局变量的值
+                            return self
+                                .builder
+                                .build_load(global_var.as_pointer_value(), ident)
+                                .unwrap()
+                                .into_int_value();
+                        } else {
+                            // 变量未定义，返回0
+                            return self.context.i32_type().const_int(0, false);
+                        }
+                    }
+                }
                 _ => {
                     // 处理其他基本表达式类型
                 }
@@ -298,7 +492,7 @@ pub fn parse(input: &str, output_filename: &str) -> Result<(), String> {
             let context = Context::create();
 
             // 创建编译器实例
-            let generator = LlvmIRGen::new(&context, "module");
+            let mut generator = LlvmIRGen::new(&context, "module");
 
             // 获取程序根节点
             let program = pairs.next().unwrap();
@@ -310,7 +504,7 @@ pub fn parse(input: &str, output_filename: &str) -> Result<(), String> {
                         generator.parse_func_def(item);
                     }
                     Rule::Decl => {
-                        // 简化处理，暂时忽略变量声明
+                        generator.parse_decl(item, true);
                     }
                     _ => continue,
                 }
@@ -332,8 +526,31 @@ mod tests {
     use crate::parser::parse;
 
     #[test]
-    fn test_parse() {
+    fn test_parse_part1() {
+        let input = fs::read_to_string("tests/test1.sysy").expect("Failed to read file");
+        parse(&input, "tests/test1.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test1.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output1.ll").expect("Failed to read file");
+        assert_eq!(output, expect_output);
+
         let input = fs::read_to_string("tests/test2.sysy").expect("Failed to read file");
         parse(&input, "tests/test2.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test2.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output2.ll").expect("Failed to read file");
+        assert_eq!(output, expect_output);
+    }
+
+    #[test]
+    fn test_parse_part2() {
+        let input = fs::read_to_string("tests/test3.sysy").expect("Failed to read file");
+        parse(&input, "tests/test3.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test3.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output3.ll").expect("Failed to read file");
+        assert_eq!(output, expect_output);
+        let input = fs::read_to_string("tests/test4.sysy").expect("Failed to read file");
+        parse(&input, "tests/test4.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test4.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output4.ll").expect("Failed to read file");
+        assert_eq!(output, expect_output);
     }
 }
