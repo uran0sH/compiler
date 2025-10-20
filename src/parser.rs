@@ -20,6 +20,10 @@ pub struct LlvmIRGen<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     scope_stack: Vec<HashMap<String, PointerValue<'ctx>>>,
+    control_stack: Vec<(
+        inkwell::basic_block::BasicBlock<'ctx>,
+        inkwell::basic_block::BasicBlock<'ctx>,
+    )>,
 }
 
 enum FuncType<'ctx> {
@@ -37,6 +41,7 @@ impl<'ctx> LlvmIRGen<'ctx> {
             module,
             builder,
             scope_stack: vec![HashMap::new()],
+            control_stack: vec![],
         }
     }
 
@@ -145,15 +150,19 @@ impl<'ctx> LlvmIRGen<'ctx> {
         func_name: &str,
         args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>,
     ) -> inkwell::values::IntValue<'ctx> {
-        // 查找函数
         if let Some(function) = self.module.get_function(func_name) {
             // 调用函数
             let result = self
                 .builder
-                .build_call(function, &args, "returnValue")
+                .build_call(function, &args, func_name)
                 .unwrap();
-            // 将调用结果转换为IntValue
-            result.try_as_basic_value().left().unwrap().into_int_value()
+            match result.try_as_basic_value().left() {
+                Some(int_value) => int_value.into_int_value(),
+                None => {
+                    // 函数返回类型为void，返回0
+                    self.context.i32_type().const_int(0, false)
+                }
+            }
         } else {
             // 函数未定义，返回0
             self.context.i32_type().const_int(0, false)
@@ -199,36 +208,35 @@ impl<'ctx> LlvmIRGen<'ctx> {
             _ => unreachable!(),
         }
     }
-
     // 解析常量定义
     fn parse_const_def(&mut self, const_def: Pair<Rule>) {
         let mut inner = const_def.into_inner();
 
-    // 获取常量名
-    let ident = inner.next().unwrap().as_str();
+        // 获取常量名
+        let ident = inner.next().unwrap().as_str();
 
-    // 跳过可选的数组维度 (LBracket ~ ConstExp ~ RBracket)*
-    while let Some(item) = inner.next() {
-        if item.as_rule() == Rule::LBracket {
-            // Skip ConstExp
-            let _ = inner.next();
-            // Skip RBracket
-            let _ = inner.next();
-        } else if item.as_rule() == Rule::Assign {
-            // 解析常量初始化值
-            let init_val = inner.next().unwrap();
-            let value = self.parse_const_init_val(init_val);
+        // 跳过可选的数组维度 (LBracket ~ ConstExp ~ RBracket)*
+        while let Some(item) = inner.next() {
+            if item.as_rule() == Rule::LBracket {
+                // Skip ConstExp
+                let _ = inner.next();
+                // Skip RBracket
+                let _ = inner.next();
+            } else if item.as_rule() == Rule::Assign {
+                // 解析常量初始化值
+                let init_val = inner.next().unwrap();
+                let value = self.parse_const_init_val(init_val);
 
-            // 在当前作用域中创建常量变量
-            let alloca = self
-                .builder
-                .build_alloca(self.context.i32_type(), ident)
-                .unwrap();
-            let _ = self.builder.build_store(alloca, value);
-            self.add_variable(ident, alloca);
-            break;
+                // 在当前作用域中创建常量变量
+                let alloca = self
+                    .builder
+                    .build_alloca(self.context.i32_type(), ident)
+                    .unwrap();
+                let _ = self.builder.build_store(alloca, value);
+                self.add_variable(ident, alloca);
+                break;
+            }
         }
-    }
     }
 
     // 解析变量定义
@@ -356,14 +364,15 @@ impl<'ctx> LlvmIRGen<'ctx> {
 
     // 解析语句
     pub fn parse_stmt(
-        &self,
+        &mut self,
         stmt: Pair<Rule>,
-        _function: FunctionValue<'ctx>,
+        function: FunctionValue<'ctx>,
         has_return: &mut bool,
     ) {
         let mut inner = stmt.into_inner();
 
-        match inner.next().unwrap().as_rule() {
+        let next = inner.next().unwrap();
+        match next.as_rule() {
             Rule::Return => {
                 // 解析return后面的表达式
                 if let Some(expr) = inner.next() {
@@ -376,9 +385,440 @@ impl<'ctx> LlvmIRGen<'ctx> {
                 // 跳过分号
                 let _ = inner.next();
             }
-            _ => {
-                // 其他语句类型的处理
-                // 这里简化处理，只关注return语句
+            Rule::If => {
+                // 解析 if 语句
+                self.parse_if_stmt(function, inner, has_return);
+            }
+            Rule::While => {
+                // 解析 while 循环
+                // 直接调用parse_while_stmt，不消费While标记
+                self.parse_while_stmt(function, inner, has_return);
+            }
+            Rule::Break => {
+                let _ = inner.next();
+
+                // 从控制栈中获取最近的循环结束块
+                if let Some((_, after_block)) = self.control_stack.last() {
+                    // 跳转到循环结束块
+                    self.builder
+                        .build_unconditional_branch(*after_block)
+                        .unwrap();
+                } else {
+                    // 如果没有循环结构，则报错
+                    panic!("break statement not within a loop");
+                }
+            }
+            Rule::Continue => {
+                // 解析 continue 语句
+                // 注意：我们需要知道当前的循环结构，这里简化处理
+                // 跳过分号
+                let _ = inner.next();
+
+                // 从控制栈中获取最近的循环条件块
+                if let Some((cond_block, _)) = self.control_stack.last() {
+                    // 跳转到循环条件块
+                    self.builder
+                        .build_unconditional_branch(*cond_block)
+                        .unwrap();
+                } else {
+                    // 如果没有循环结构，则报错
+                    panic!("continue statement not within a loop");
+                }
+            }
+            Rule::LVal => {
+                self.parse_assign_stmt(next.as_str(), inner);
+            }
+            Rule::Block => {
+                self.parse_block(next, function, has_return);
+            },
+            Rule::Exp => {
+                self.parse_exp(next);
+            }
+            _ => {}
+        }
+    }
+
+    fn parse_if_stmt(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        mut inner: pest::iterators::Pairs<Rule>,
+        _has_return: &mut bool,
+    ) {
+        // 解析条件表达式
+        let _ = inner.next().unwrap(); // LParen
+        let cond = inner.next().unwrap(); // Cond
+        let _ = inner.next().unwrap(); // RParen
+        let then_stmt = inner.next().unwrap(); // Then Stmt
+
+        // 创建基本块，使用与output7.ll一致的命名
+        let if_true = self.context.append_basic_block(function, "if_true_");
+        let if_false = self.context.append_basic_block(function, "if_false_");
+        let next = self.context.append_basic_block(function, "if_next_");
+
+        // 评估条件表达式并生成分支
+        let cond_value = self.parse_cond(cond);
+        // 将IntValue转换为BoolValue
+        let cond_bool = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                cond_value,
+                self.context.i32_type().const_int(0, false),
+                "cond_2",
+            )
+            .unwrap();
+
+        self.builder
+            .build_conditional_branch(cond_bool, if_true, if_false)
+            .unwrap();
+
+        // 处理 then 分支
+        self.builder.position_at_end(if_true);
+        let mut then_has_return = false;
+        self.parse_stmt(then_stmt, function, &mut then_has_return);
+        // 如果 then 分支没有 return 语句，则跳转到 next 块
+        if !then_has_return
+            && self
+                .builder
+                .get_insert_block()
+                .unwrap()
+                .get_terminator()
+                .is_none()
+        {
+            self.builder.build_unconditional_branch(next).unwrap();
+        }
+
+        // 处理 else 分支（如果存在）
+        if let Some(else_token) = inner.next() {
+            if else_token.as_rule() == Rule::Else {
+                let else_stmt = inner.next().unwrap();
+                self.builder.position_at_end(if_false);
+                let mut else_has_return = false;
+                self.parse_stmt(else_stmt, function, &mut else_has_return);
+                // 如果 else 分支没有 return 语句，则跳转到 next 块
+                if !else_has_return
+                    && self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                {
+                    self.builder.build_unconditional_branch(next).unwrap();
+                }
+            }
+        } else {
+            // 如果没有 else 分支，直接跳转到 next 块
+            self.builder.position_at_end(if_false);
+            self.builder.build_unconditional_branch(next).unwrap();
+        }
+
+        // 设置插入点到 next 块
+        self.builder.position_at_end(next);
+    }
+
+    fn parse_while_stmt(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        mut inner: pest::iterators::Pairs<Rule>,
+        has_return: &mut bool,
+    ) {
+        // 保存当前块，用于循环结束后跳转到这里
+        let current_block = self.builder.get_insert_block().unwrap();
+
+        // 创建循环所需的基本块
+        let cond_block = self.context.append_basic_block(function, "whileCond");
+        let body_block = self.context.append_basic_block(function, "whileBody");
+        let after_block = self.context.append_basic_block(function, "whileNext"); // 修改为 whileNext
+
+        // 将循环结束块添加到控制栈，以便break语句可以跳转到这里
+        self.control_stack.push((cond_block, after_block));
+
+        // 从当前块跳转到条件块
+        self.builder.build_unconditional_branch(cond_block).unwrap();
+
+        // 处理条件块
+        self.builder.position_at_end(cond_block);
+
+        // 解析条件表达式
+        let lparen = inner.next().unwrap(); // LParen
+        assert!(lparen.as_rule() == Rule::LParen);
+
+        let cond = inner.next().unwrap(); // Cond
+        let cond_value = self.parse_cond(cond);
+
+        let rparen = inner.next().unwrap(); // RParen
+        assert!(rparen.as_rule() == Rule::RParen);
+
+        // 将IntValue转换为BoolValue，类似于您提供的示例中的 %cond_2 = icmp ne i32 %cond_1, 0
+        let cond_bool = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                cond_value,
+                self.context.i32_type().const_int(0, false),
+                "cond_2",
+            )
+            .unwrap();
+
+        self.builder
+            .build_conditional_branch(cond_bool, body_block, after_block)
+            .unwrap();
+
+        // 处理循环体
+        self.builder.position_at_end(body_block);
+        let body_stmt = inner.next().unwrap();
+        self.parse_stmt(body_stmt, function, has_return);
+
+        // 如果当前块没有终止符，则添加跳转到条件块的指令
+        if self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_terminator()
+            .is_none()
+        {
+            // 循环结束后跳回条件块
+            self.builder.build_unconditional_branch(cond_block).unwrap();
+        }
+
+        // 从控制栈中移除当前循环的信息
+        self.control_stack.pop();
+
+        // 设置插入点到循环之后的块
+        self.builder.position_at_end(after_block);
+    }
+
+    // 添加解析条件表达式的方法
+    fn parse_cond(&self, cond: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
+        let mut inner = cond.into_inner();
+        self.parse_l_or_exp(inner.next().unwrap())
+    }
+
+    // 添加解析逻辑或表达式的方法（支持短路）
+    fn parse_l_or_exp(&self, l_or_exp: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
+        let mut inner = l_or_exp.into_inner();
+        let mut result = self.parse_l_and_exp(inner.next().unwrap());
+
+        // 检查是否有更多的逻辑或表达式
+        while let Some(item) = inner.next() {
+            if item.as_rule() == Rule::Or {
+                // 解析右侧表达式
+                let right_exp = self.parse_l_and_exp(inner.next().unwrap());
+
+                // 将左右表达式转换为布尔值
+                let left_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        result,
+                        self.context.i32_type().const_int(0, false),
+                        "left_bool",
+                    )
+                    .unwrap();
+
+                let right_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        right_exp,
+                        self.context.i32_type().const_int(0, false),
+                        "right_bool",
+                    )
+                    .unwrap();
+
+                // 执行逻辑或运算
+                let or_result = self
+                    .builder
+                    .build_or(left_bool, right_bool, "or_result")
+                    .unwrap();
+
+                // 将结果转换回整数
+                result = self
+                    .builder
+                    .build_int_z_extend(or_result, self.context.i32_type(), "or_int")
+                    .unwrap();
+            }
+        }
+
+        result
+    }
+
+    // 添加解析逻辑与表达式的方法（支持短路）
+    fn parse_l_and_exp(&self, l_and_exp: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
+        let mut inner = l_and_exp.into_inner();
+        let mut result = self.parse_eq_exp(inner.next().unwrap());
+
+        // 检查是否有更多的逻辑与表达式
+        while let Some(item) = inner.next() {
+            if item.as_rule() == Rule::And {
+                // 解析右侧表达式
+                let right_exp = self.parse_eq_exp(inner.next().unwrap());
+
+                // 将左右表达式转换为布尔值
+                let left_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        result,
+                        self.context.i32_type().const_int(0, false),
+                        "left_bool",
+                    )
+                    .unwrap();
+
+                let right_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        right_exp,
+                        self.context.i32_type().const_int(0, false),
+                        "right_bool",
+                    )
+                    .unwrap();
+
+                // 执行逻辑与运算
+                let and_result = self
+                    .builder
+                    .build_and(left_bool, right_bool, "and_result")
+                    .unwrap();
+
+                // 将结果转换回整数
+                result = self
+                    .builder
+                    .build_int_z_extend(and_result, self.context.i32_type(), "and_int")
+                    .unwrap();
+            }
+        }
+
+        result
+    }
+
+    // 添加解析相等表达式的方法
+    fn parse_eq_exp(&self, eq_exp: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
+        let mut inner = eq_exp.into_inner();
+        let mut result = self.parse_rel_exp(inner.next().unwrap());
+
+        while let Some(item) = inner.next() {
+            match item.as_rule() {
+                Rule::Eq => {
+                    let next_rel = self.parse_rel_exp(inner.next().unwrap());
+                    let cmp = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, result, next_rel, "eqtmp")
+                        .unwrap();
+                    result = self
+                        .builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "eqext")
+                        .unwrap();
+                }
+                Rule::Neq => {
+                    let next_rel = self.parse_rel_exp(inner.next().unwrap());
+                    let cmp = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::NE, result, next_rel, "neqt")
+                        .unwrap();
+                    result = self
+                        .builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "neqext")
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        result
+    }
+
+    fn parse_rel_exp(&self, rel_exp: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
+        let mut inner = rel_exp.into_inner();
+        let mut result = self.parse_add_exp(inner.next().unwrap());
+
+        while let Some(item) = inner.next() {
+            match item.as_rule() {
+                Rule::Lt => {
+                    let next_add = self.parse_add_exp(inner.next().unwrap());
+                    let cmp = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SLT, result, next_add, "cond_")
+                        .unwrap();
+                    result = self
+                        .builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "cond_1")
+                        .unwrap();
+                }
+                Rule::Gt => {
+                    let next_add = self.parse_add_exp(inner.next().unwrap());
+                    let cmp = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SGT, result, next_add, "cond_")
+                        .unwrap();
+                    result = self
+                        .builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "cond_1")
+                        .unwrap();
+                }
+                Rule::Le => {
+                    let next_add = self.parse_add_exp(inner.next().unwrap());
+                    let cmp = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SLE, result, next_add, "cond_")
+                        .unwrap();
+                    result = self
+                        .builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "cond_1")
+                        .unwrap();
+                }
+                Rule::Ge => {
+                    let next_add = self.parse_add_exp(inner.next().unwrap());
+                    let cmp = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SGE, result, next_add, "cond_")
+                        .unwrap();
+                    result = self
+                        .builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "cond_1")
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        result
+    }
+
+    fn parse_assign_stmt(&self, ident: &str, mut inner: pest::iterators::Pairs<Rule>) {
+        // 检查是否为赋值操作符
+        if let Some(op) = inner.next() {
+            if op.as_rule() == Rule::Assign {
+                // 解析赋值表达式
+                let exp = inner.next().unwrap();
+                let value = self.parse_exp(exp);
+                // 查找左值对应的变量指针
+                if let Some(var_ptr) = self.find_variable(ident.trim()) {
+                    // 存储值到变量
+                    self.builder.build_store(var_ptr, value).unwrap();
+                } else {
+                    if let Some(global_var) = self.module.get_global(ident.trim()) {
+                        self.builder
+                            .build_store(global_var.as_pointer_value(), value)
+                            .unwrap();
+                    }
+                }
+            } else {
+                println!("call func_call");
+                let mut args = vec![];
+                if op.as_rule() == Rule::FuncRParams {
+                    args = self.parse_func_rparams(op);
+                }
+                // 调用函数
+                self.parse_func_call(ident, args);
+            }
+        }
+
+        // 跳过分号
+        while let Some(item) = inner.next() {
+            if item.as_rule() == Rule::Semicolon {
+                break;
             }
         }
     }
@@ -418,7 +858,6 @@ impl<'ctx> LlvmIRGen<'ctx> {
 
         return result;
     }
-
     // 解析乘法表达式
     pub fn parse_mul_exp(&self, mul_exp: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
         let mut inner = mul_exp.into_inner();
@@ -668,6 +1107,20 @@ mod tests {
         parse(&input, "tests/test6.ll").expect("Failed to parse");
         let output = fs::read_to_string("tests/test6.ll").expect("Failed to read file");
         let expect_output = fs::read_to_string("tests/output6.ll").expect("Failed to read file");
+        assert_eq!(output, expect_output);
+    }
+
+    #[test]
+    fn test_parse_part4() {
+        let input = fs::read_to_string("tests/test7.sysy").expect("Failed to read file");
+        parse(&input, "tests/test7.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test7.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output7.ll").expect("Failed to read file");
+        // assert_eq!(output, expect_output);
+        let input = fs::read_to_string("tests/test8.sysy").expect("Failed to read file");
+        parse(&input, "tests/test8.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test8.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output8.ll").expect("Failed to read file");
         assert_eq!(output, expect_output);
     }
 }

@@ -118,7 +118,7 @@ MulExp = { UnaryExp ~ ((Mul | Div | Mod) ~ UnaryExp)* }
 
 AddExp = { MulExp ~ ((Plus | Minus) ~ MulExp)* }
 
-RelExp = { AddExp ~ ((Lt | Gt | Le | Ge) ~ AddExp)* }
+RelExp = { AddExp ~ ((Le | Ge | Lt | Gt) ~ AddExp)* }
 
 EqExp = { RelExp ~ ((Eq | Neq) ~ RelExp)* }
 
