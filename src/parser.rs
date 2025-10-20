@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::Hash;
 
 use inkwell::AddressSpace;
@@ -36,7 +36,7 @@ impl<'ctx> LlvmIRGen<'ctx> {
             context,
             module,
             builder,
-            scope_stack: Vec::new(),
+            scope_stack: vec![HashMap::new()],
         }
     }
 
@@ -58,7 +58,10 @@ impl<'ctx> LlvmIRGen<'ctx> {
     }
 
     fn add_variable(&mut self, name: &str, val: PointerValue<'ctx>) {
-        self.scope_stack.last_mut().unwrap().insert(name.to_string(), val);
+        self.scope_stack
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), val);
     }
 
     pub fn parse_func_def(&mut self, func_def: Pair<Rule>) {
@@ -79,6 +82,7 @@ impl<'ctx> LlvmIRGen<'ctx> {
 
         let next = inner.next().unwrap();
         let mut has_params = false;
+        let mut param_names = vec![];
         let param_types = if next.as_rule() == Rule::FuncFParams {
             has_params = true;
             let mut types = vec![];
@@ -86,6 +90,10 @@ impl<'ctx> LlvmIRGen<'ctx> {
                 match param.as_rule() {
                     Rule::FuncFParam => {
                         types.push(self.context.i32_type().into());
+                        let mut param_inner = param.into_inner();
+                        let _btype = param_inner.next().unwrap(); // BType
+                        let ident = param_inner.next().unwrap().as_str();
+                        param_names.push(ident.to_string());
                     }
                     Rule::Comma => {}
                     _ => unreachable!(),
@@ -104,12 +112,23 @@ impl<'ctx> LlvmIRGen<'ctx> {
 
         let function = self.module.add_function(func_name, fn_type, None);
 
-        let entry_block = self.context.append_basic_block(function, "mainEntry");
+        let entry_block = self
+            .context
+            .append_basic_block(function, &format!("{}Entry", func_name));
         self.builder.position_at_end(entry_block);
 
         if has_params {
             // RParen
             let _ = inner.next();
+            for (i, param_name) in param_names.iter().enumerate() {
+                let param = function.get_nth_param(i as u32).unwrap();
+                let alloca = self
+                    .builder
+                    .build_alloca(self.context.i32_type(), param_name)
+                    .unwrap();
+                self.builder.build_store(alloca, param).unwrap();
+                self.add_variable(param_name, alloca);
+            }
         }
         let mut has_return = false;
         self.parse_block(inner.next().unwrap(), function, &mut has_return);
@@ -119,6 +138,26 @@ impl<'ctx> LlvmIRGen<'ctx> {
         //     let zero = self.context.i32_type().const_int(0, false);
         //     self.builder.build_return(Some(&zero));
         // }
+    }
+
+    fn parse_func_call(
+        &self,
+        func_name: &str,
+        args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>,
+    ) -> inkwell::values::IntValue<'ctx> {
+        // 查找函数
+        if let Some(function) = self.module.get_function(func_name) {
+            // 调用函数
+            let result = self
+                .builder
+                .build_call(function, &args, "returnValue")
+                .unwrap();
+            // 将调用结果转换为IntValue
+            result.try_as_basic_value().left().unwrap().into_int_value()
+        } else {
+            // 函数未定义，返回0
+            self.context.i32_type().const_int(0, false)
+        }
     }
 
     pub fn parse_decl(&mut self, decl: Pair<Rule>, is_global: bool) {
@@ -162,7 +201,35 @@ impl<'ctx> LlvmIRGen<'ctx> {
     }
 
     // 解析常量定义
-    fn parse_const_def(&self, const_def: Pair<Rule>) {}
+    fn parse_const_def(&mut self, const_def: Pair<Rule>) {
+        let mut inner = const_def.into_inner();
+
+    // 获取常量名
+    let ident = inner.next().unwrap().as_str();
+
+    // 跳过可选的数组维度 (LBracket ~ ConstExp ~ RBracket)*
+    while let Some(item) = inner.next() {
+        if item.as_rule() == Rule::LBracket {
+            // Skip ConstExp
+            let _ = inner.next();
+            // Skip RBracket
+            let _ = inner.next();
+        } else if item.as_rule() == Rule::Assign {
+            // 解析常量初始化值
+            let init_val = inner.next().unwrap();
+            let value = self.parse_const_init_val(init_val);
+
+            // 在当前作用域中创建常量变量
+            let alloca = self
+                .builder
+                .build_alloca(self.context.i32_type(), ident)
+                .unwrap();
+            let _ = self.builder.build_store(alloca, value);
+            self.add_variable(ident, alloca);
+            break;
+        }
+    }
+    }
 
     // 解析变量定义
     fn parse_var_def(&mut self, var_def: Pair<Rule>, is_global: bool) {
@@ -218,10 +285,11 @@ impl<'ctx> LlvmIRGen<'ctx> {
     fn parse_const_init_val(&self, init_val: Pair<Rule>) -> inkwell::values::IntValue<'ctx> {
         let mut inner = init_val.into_inner();
 
-        match inner.next().unwrap().as_rule() {
+        let next = inner.next().unwrap();
+        match next.as_rule() {
             Rule::ConstExp => {
                 // 解析常量表达式
-                self.parse_exp(inner.next().unwrap())
+                self.parse_exp(next)
             }
             Rule::LBrace => {
                 // 处理数组初始化 { ... }
@@ -409,8 +477,19 @@ impl<'ctx> LlvmIRGen<'ctx> {
                         }
                     }
                 }
+                Rule::Ident => {
+                    let func_name = item.as_str();
+                    let mut args = vec![];
+                    // 解析函数参数
+                    while let Some(arg) = inner.next() {
+                        if arg.as_rule() == Rule::FuncRParams {
+                            args = self.parse_func_rparams(arg);
+                        }
+                    }
+                    return self.parse_func_call(func_name, args);
+                }
                 _ => {
-                    // 处理其他情况
+                    unreachable!()
                 }
             }
         }
@@ -483,6 +562,30 @@ impl<'ctx> LlvmIRGen<'ctx> {
             .print_to_file(filename)
             .map_err(|e| e.to_string())
     }
+
+    fn parse_func_rparams(
+        &self,
+        arg: Pair<'_, Rule>,
+    ) -> Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> {
+        let inner = arg.into_inner();
+        let mut params = vec![];
+        for item in inner {
+            match item.as_rule() {
+                Rule::Exp => {
+                    // 解析表达式并转换为IntValue
+                    let int_value = self.parse_exp(item);
+                    // 将IntValue转换为BasicMetadataValueEnum
+                    params.push(inkwell::values::BasicMetadataValueEnum::IntValue(int_value));
+                }
+                Rule::Comma => {
+                    // 跳过逗号，继续处理下一个参数
+                    continue;
+                }
+                _ => break,
+            }
+        }
+        params
+    }
 }
 
 pub fn parse(input: &str, output_filename: &str) -> Result<(), String> {
@@ -551,6 +654,20 @@ mod tests {
         parse(&input, "tests/test4.ll").expect("Failed to parse");
         let output = fs::read_to_string("tests/test4.ll").expect("Failed to read file");
         let expect_output = fs::read_to_string("tests/output4.ll").expect("Failed to read file");
+        assert_eq!(output, expect_output);
+    }
+
+    #[test]
+    fn test_parse_part3() {
+        let input = fs::read_to_string("tests/test5.sysy").expect("Failed to read file");
+        parse(&input, "tests/test5.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test5.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output5.ll").expect("Failed to read file");
+        assert_eq!(output, expect_output);
+        let input = fs::read_to_string("tests/test6.sysy").expect("Failed to read file");
+        parse(&input, "tests/test6.ll").expect("Failed to parse");
+        let output = fs::read_to_string("tests/test6.ll").expect("Failed to read file");
+        let expect_output = fs::read_to_string("tests/output6.ll").expect("Failed to read file");
         assert_eq!(output, expect_output);
     }
 }
