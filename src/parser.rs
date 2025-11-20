@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     hash::Hash,
 };
 
@@ -190,7 +190,7 @@ impl Analyzer {
                 return Some(ty);
             }
         }
-        None
+        self.current_function_params.as_ref().and_then(|params| params.get(name))
     }
 
     fn declare_function(&mut self, name: String, func_ty: FunctionType) -> Result<(), String> {
@@ -228,7 +228,7 @@ pub fn parse(input: &str) {
             }
         }
         Err(e) => {
-            panic!();
+            eprintln!("{}", e);
         }
     }
 }
@@ -558,7 +558,7 @@ fn visit_func_fparams(pair: Pair<Rule>, a: &mut Analyzer, fun_name: &str) -> Has
     return ident;
 }
 
-fn visit_func_fparam(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(String, Type)> {
+fn visit_func_fparam(pair: Pair<Rule>, _a: &mut Analyzer) -> Option<(String, Type)> {
     let inner_pairs = pair.into_inner().collect::<Vec<Pair<Rule>>>();
     let _btype = inner_pairs[0].clone();
     let ident = inner_pairs[1].clone();
@@ -634,7 +634,7 @@ fn visit_mul_exp(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
         None => return None,
     };
     let mut result = left_v;
-    for i in 1..l {
+    for i in (1..l).step_by(2) {
         let op = inner_pairs[i].clone();
         let right = inner_pairs[i + 1].clone();
         let (right_v, right_t) = match visit_unary_exp(right, a) {
@@ -692,6 +692,12 @@ fn visit_unary_exp(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
         let ft = match a.lookup_function(inner_pairs[0].as_str()) {
             Some(v) => v.clone(),
             None => {
+                a.is_error = true;
+                report_semantic_error(
+                    ErrorCode::UndefinedFunc.into(),
+                    line_col.0,
+                    "Can't find func",
+                );
                 return None;
             }
         };
@@ -713,7 +719,20 @@ fn visit_unary_exp(pair: Pair<Rule>, a: &mut Analyzer) -> Option<(i64, Type)> {
         return Some((0, *(ft.ret_ty.clone())));
     }
     if inner_pairs[0].as_rule() == Rule::UnaryOp {
-        return visit_unary_exp(inner_pairs[1].clone(), a);
+        let (v, t) = match visit_unary_exp(inner_pairs[1].clone(), a) {
+            Some((v, t)) => (v, t),
+            None => return None,
+        };
+        if t != Type::Int {
+            a.is_error = true;
+            report_semantic_error(
+                ErrorCode::UnmatchedOp.into(),
+                line_col.0,
+                "unary op's type is not int",
+            );
+            return None;
+        }
+        return Some((v, t))
     }
     return visit_primary_exp(inner_pairs[0].clone(), a);
 }
@@ -1069,19 +1088,19 @@ mod tests {
 
     #[test]
     fn test_normal1() {
-        let input = &read_file("tests/input1.txt");
+        let input = &read_file("tests/normaltest01.sy");
         parse(input);
     }
 
     #[test]
     fn test_normal2() {
-        let input = &read_file("tests/input2.txt");
+        let input = &read_file("tests/normaltest02.sy");
         parse(input);
     }
 
     #[test]
-    fn test_normal3() {
-        let input = &read_file("tests/input3.txt");
+    fn test_normal6() {
+        let input = &read_file("tests/normaltest06.sy");
         parse(input);
     }
 }
