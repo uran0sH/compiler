@@ -45,6 +45,7 @@ if_next_:                                         ; preds = %if_false_, %if_true
   %target12 = load i32, i32* %target, align 4
   %source13 = load i32, i32* %source, align 4
   call void @hanoi(i32 %tmp_10, i32 %auxiliary11, i32 %target12, i32 %source13)
+  ret void
 }
 
 define i32 @main() {

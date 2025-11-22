@@ -138,11 +138,19 @@ impl<'ctx> LlvmIRGen<'ctx> {
         let mut has_return = false;
         self.parse_block(inner.next().unwrap(), function, &mut has_return);
 
-        // 如果没有return语句且返回类型不是void，则添加默认返回值
-        // if !has_return && ret_ty != Type::Void {
-        //     let zero = self.context.i32_type().const_int(0, false);
-        //     self.builder.build_return(Some(&zero));
-        // }
+        if !has_return {
+            match ret_ty {
+                FuncType::Void(_) => {
+                    // 对于void返回类型的函数，添加ret void指令
+                    self.builder.build_return(None).unwrap();
+                }
+                FuncType::Int(_) => {
+                    // 对于int返回类型的函数，添加默认返回值0
+                    let zero = self.context.i32_type().const_int(0, false);
+                    self.builder.build_return(Some(&zero)).unwrap();
+                }
+            }
+        }
     }
 
     fn parse_func_call(
@@ -152,10 +160,7 @@ impl<'ctx> LlvmIRGen<'ctx> {
     ) -> inkwell::values::IntValue<'ctx> {
         if let Some(function) = self.module.get_function(func_name) {
             // 调用函数
-            let result = self
-                .builder
-                .build_call(function, &args, func_name)
-                .unwrap();
+            let result = self.builder.build_call(function, &args, func_name).unwrap();
             match result.try_as_basic_value().left() {
                 Some(int_value) => int_value.into_int_value(),
                 None => {
@@ -430,7 +435,7 @@ impl<'ctx> LlvmIRGen<'ctx> {
             }
             Rule::Block => {
                 self.parse_block(next, function, has_return);
-            },
+            }
             Rule::Exp => {
                 self.parse_exp(next);
             }
