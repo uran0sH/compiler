@@ -12,6 +12,13 @@ Return   = @{ "return" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 Keyword = { Const | Int | Void | If | Else | While | Break | Continue | Return }
 
+Eq  = @{ "==" }
+Neq = @{ "!=" }
+Le  = @{ "<=" }
+Ge  = @{ ">=" }
+Lt  = @{ "<" }
+Gt  = @{ ">" }
+
 Plus      = { "+" }
 Minus     = { "-" }
 Mul       = { "*" }
@@ -29,13 +36,6 @@ LBracket  = { "[" }
 RBracket  = { "]" }
 Comma     = { "," }
 Semicolon = { ";" }
-
-Eq  = { "==" }
-Neq = { "!=" }
-Lt  = { "<" }
-Gt  = { ">" }
-Le  = { "<=" }
-Ge  = { ">=" }
 
 LINE_COMMENT = @{ "//" ~ (!NEWLINE ~ ANY)* ~ (NEWLINE | EOI) }
 
